@@ -15,16 +15,6 @@ import (
 	"golang.org/x/oauth2"
 )
 
-/*
-
-DigitalOcean API DNS provider:
-
-Info required in `creds.json`:
-   - token
-
-*/
-
-// DoApi is the handle for operations.
 type DoApi struct {
 	client *godo.Client
 }
@@ -34,8 +24,6 @@ var defaultNameServerNames = []string{
 	"ns2.digitalocean.com",
 	"ns3.digitalocean.com",
 }
-
-// NewDo creates a DO-specific DNS provider.
 func NewDo(m map[string]string, metadata json.RawMessage) (providers.DNSServiceProvider, error) {
 	if m["token"] == "" {
 		return nil, fmt.Errorf("no DigitalOcean token provided")
@@ -50,7 +38,6 @@ func NewDo(m map[string]string, metadata json.RawMessage) (providers.DNSServiceP
 
 	api := &DoApi{client: client}
 
-	// Get a domain to validate the token
 	_, resp, err := api.client.Domains.List(ctx, &godo.ListOptions{PerPage: 1})
 	if err != nil {
 		return nil, err
@@ -66,9 +53,6 @@ var features = providers.DocumentationNotes{
 	providers.DocCreateDomains:       providers.Can(),
 	providers.DocOfficiallySupported: providers.Cannot(),
 	providers.CanUseSRV:              providers.Can(),
-	// Digitalocean support CAA records, except
-	// ";" value with issue/issuewild records:
-	// https://www.digitalocean.com/docs/networking/dns/how-to/create-caa-records/
 	providers.CanUseCAA: providers.Can(),
 }
 
@@ -76,7 +60,6 @@ func init() {
 	providers.RegisterDomainServiceProviderType("DIGITALOCEAN", NewDo, features)
 }
 
-// EnsureDomainExists returns an error if domain doesn't exist.
 func (api *DoApi) EnsureDomainExists(domain string) error {
 	ctx := context.Background()
 	_, resp, err := api.client.Domains.Get(ctx, domain)
@@ -90,12 +73,10 @@ func (api *DoApi) EnsureDomainExists(domain string) error {
 	return err
 }
 
-// GetNameservers returns the nameservers for domain.
 func (api *DoApi) GetNameservers(domain string) ([]*models.Nameserver, error) {
 	return models.StringsToNameservers(defaultNameServerNames), nil
 }
 
-// GetDomainCorrections returns a list of corretions for the  domain.
 func (api *DoApi) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Correction, error) {
 	ctx := context.Background()
 	dc.Punycode()
@@ -114,7 +95,6 @@ func (api *DoApi) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Corre
 		existingRecords = append(existingRecords, r)
 	}
 
-	// Normalize
 	models.PostProcessRecords(existingRecords)
 
 	differ := diff.New(dc)
@@ -122,7 +102,6 @@ func (api *DoApi) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Corre
 
 	var corrections = []*models.Correction{}
 
-	// Deletes first so changing type works etc.
 	for _, m := range delete {
 		id := m.Existing.Original.(*godo.DomainRecord).ID
 		corr := &models.Correction{
@@ -192,22 +171,16 @@ func getRecords(api *DoApi, name string) ([]godo.DomainRecord, error) {
 }
 
 func toRc(dc *models.DomainConfig, r *godo.DomainRecord) *models.RecordConfig {
-	// This handles "@" etc.
 	name := dnsutil.AddOrigin(r.Name, dc.Name)
 
 	target := r.Data
-	// Make target FQDN (#rtype_variations)
 	if r.Type == "CNAME" || r.Type == "MX" || r.Type == "NS" || r.Type == "SRV" {
-		// If target is the domainname, e.g. cname foo.example.com -> example.com,
-		// DO returns "@" on read even if fqdn was written.
 		if target == "@" {
 			target = dc.Name
 		} else if target == "." {
-			target = "" // don't append another dot to null records
+			target = ""
 		}
 		target = dnsutil.AddOrigin(target+".", dc.Name)
-		// FIXME(tlim): The AddOrigin should be a no-op.
-		// Test whether or not it is actually needed.
 	}
 
 	t := &models.RecordConfig{
@@ -227,31 +200,25 @@ func toRc(dc *models.DomainConfig, r *godo.DomainRecord) *models.RecordConfig {
 	case "TXT":
 		t.SetTargetTXTString(target)
 	default:
-		// nothing additional required
 	}
 	return t
 }
 
 func toReq(dc *models.DomainConfig, rc *models.RecordConfig) *godo.DomainRecordEditRequest {
-	name := rc.GetLabel()         // DO wants the short name or "@" for apex.
-	target := rc.GetTargetField() // DO uses the target field only for a single value
-	priority := 0                 // DO uses the same property for MX and SRV priority
+	name := rc.GetLabel() 
+	target := rc.GetTargetField()
+	priority := 0
 
-	switch rc.Type { // #rtype_variations
+	switch rc.Type {
 	case "MX":
 		priority = int(rc.MxPreference)
 	case "SRV":
 		priority = int(rc.SrvPriority)
 	case "TXT":
-		// TXT records are the one place where DO combines many items into one field.
 		target = rc.GetTargetCombined()
 	case "CAA":
-		// DO API requires that value ends in dot
-		// But the value returned from API doesn't contain this,
-		// so no need to strip the dot when reading value from API.
 		target = target + "."
 	default:
-		// no action required
 	}
 
 	return &godo.DomainRecordEditRequest{
