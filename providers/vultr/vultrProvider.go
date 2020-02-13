@@ -16,15 +16,6 @@ import (
 	"github.com/StackExchange/dnscontrol/v2/providers/diff"
 )
 
-/*
-
-Vultr API DNS provider:
-
-Info required in `creds.json`:
-   - token
-
-*/
-
 var features = providers.DocumentationNotes{
 	providers.CanUseAlias:            providers.Cannot(),
 	providers.CanUseCAA:              providers.Can(),
@@ -35,24 +26,17 @@ var features = providers.DocumentationNotes{
 	providers.DocCreateDomains:       providers.Can(),
 	providers.DocOfficiallySupported: providers.Cannot(),
 }
-
 func init() {
 	providers.RegisterDomainServiceProviderType("VULTR", NewProvider, features)
 }
-
-// Provider represents the Vultr DNSServiceProvider.
 type Provider struct {
 	client *govultr.Client
 	token  string
 }
-
-// defaultNS contains the default nameservers for Vultr.
 var defaultNS = []string{
 	"ns1.vultr.com",
 	"ns2.vultr.com",
 }
-
-// NewProvider initializes a Vultr DNSServiceProvider.
 func NewProvider(m map[string]string, metadata json.RawMessage) (providers.DNSServiceProvider, error) {
 	token := m["token"]
 	if token == "" {
@@ -65,8 +49,6 @@ func NewProvider(m map[string]string, metadata json.RawMessage) (providers.DNSSe
 	_, err := client.Account.GetInfo(context.Background())
 	return &Provider{client, token}, err
 }
-
-// GetDomainCorrections gets the corrections for a DomainConfig.
 func (api *Provider) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Correction, error) {
 	dc.Punycode()
 
@@ -123,24 +105,16 @@ func (api *Provider) GetDomainCorrections(dc *models.DomainConfig) ([]*models.Co
 
 	return corrections, nil
 }
-
-// GetNameservers gets the Vultr nameservers for a domain
 func (api *Provider) GetNameservers(domain string) ([]*models.Nameserver, error) {
 	return models.StringsToNameservers(defaultNS), nil
 }
-
-// EnsureDomainExists adds a domain to the Vutr DNS service if it does not exist
 func (api *Provider) EnsureDomainExists(domain string) error {
 	if ok, err := api.isDomainInAccount(domain); err != nil {
 		return err
-	} else if ok {
-		return nil
 	}
-
-	// Vultr requires an initial IP, use a dummy one.
+	else return nil
 	return api.client.DNSDomain.Create(context.Background(), domain, "0.0.0.0")
 }
-
 func (api *Provider) isDomainInAccount(domain string) (bool, error) {
 	domains, err := api.client.DNSDomain.List(context.Background())
 	if err != nil {
@@ -153,8 +127,6 @@ func (api *Provider) isDomainInAccount(domain string) (bool, error) {
 	}
 	return false, nil
 }
-
-// toRecordConfig converts a Vultr DNSRecord to a RecordConfig. #rtype_variations
 func toRecordConfig(dc *models.DomainConfig, r *govultr.DNSRecord) (*models.RecordConfig, error) {
 	origin, data := dc.Name, r.Data
 	rc := &models.RecordConfig{
@@ -166,14 +138,11 @@ func toRecordConfig(dc *models.DomainConfig, r *govultr.DNSRecord) (*models.Reco
 	switch rtype := r.Type; rtype {
 	case "CNAME", "NS":
 		rc.Type = r.Type
-		// Make target into a FQDN if it is a CNAME, NS, MX, or SRV.
 		if !strings.HasSuffix(data, ".") {
 			data = data + "."
 		}
-		// FIXME(tlim): the AddOrigin() might be unneeded. Please test.
 		return rc, rc.SetTarget(dnsutil.AddOrigin(data, origin))
 	case "CAA":
-		// Vultr returns CAA records in the format "[flag] [tag] [value]".
 		return rc, rc.SetTargetCAAString(data)
 	case "MX":
 		if !strings.HasSuffix(data, ".") {
@@ -181,10 +150,8 @@ func toRecordConfig(dc *models.DomainConfig, r *govultr.DNSRecord) (*models.Reco
 		}
 		return rc, rc.SetTargetMX(uint16(r.Priority), data)
 	case "SRV":
-		// Vultr returns SRV records in the format "[weight] [port] [target]".
 		return rc, rc.SetTargetSRVPriorityString(uint16(r.Priority), data)
 	case "TXT":
-		// Remove quotes if it is a TXT record.
 		if !strings.HasPrefix(data, `"`) || !strings.HasSuffix(data, `"`) {
 			return nil, errors.New("Unexpected lack of quotes in TXT record from Vultr")
 		}
@@ -193,22 +160,17 @@ func toRecordConfig(dc *models.DomainConfig, r *govultr.DNSRecord) (*models.Reco
 		return rc, rc.PopulateFromString(rtype, r.Data, origin)
 	}
 }
-
-// toVultrRecord converts a RecordConfig converted by toRecordConfig back to a Vultr DNSRecord. #rtype_variations
 func toVultrRecord(dc *models.DomainConfig, rc *models.RecordConfig, vultrID int) *govultr.DNSRecord {
 	name := rc.GetLabel()
-	// Vultr uses a blank string to represent the apex domain.
 	if name == "@" {
 		name = ""
 	}
 
 	data := rc.GetTargetField()
 
-	// Vultr does not use a period suffix for CNAME, NS, or MX.
 	if strings.HasSuffix(data, ".") {
 		data = data[:len(data)-1]
 	}
-	// Vultr needs TXT record in quotes.
 	if rc.Type == "TXT" {
 		data = fmt.Sprintf(`"%s"`, data)
 	}
@@ -230,7 +192,7 @@ func toVultrRecord(dc *models.DomainConfig, rc *models.RecordConfig, vultrID int
 		TTL:      int(rc.TTL),
 		Priority: priority,
 	}
-	switch rtype := rc.Type; rtype { // #rtype_variations
+	switch rtype := rc.Type; rtype {
 	case "SRV":
 		r.Data = fmt.Sprintf("%v %v %s", rc.SrvWeight, rc.SrvPort, rc.GetTargetField())
 	case "CAA":
