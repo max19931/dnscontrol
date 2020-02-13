@@ -10,32 +10,23 @@ import (
 	"github.com/StackExchange/dnscontrol/v2/pkg/printer"
 )
 
-// Correlation stores a difference between two domains.
 type Correlation struct {
 	d        *differ
 	Existing *models.RecordConfig
 	Desired  *models.RecordConfig
 }
 
-// Changeset stores many Correlation.
 type Changeset []Correlation
 
-// Differ is an interface for computing the difference between two zones.
 type Differ interface {
-	// IncrementalDiff performs a diff on a record-by-record basis, and returns a sets for which records need to be created, deleted, or modified.
 	IncrementalDiff(existing []*models.RecordConfig) (unchanged, create, toDelete, modify Changeset)
-	// ChangedGroups performs a diff more appropriate for providers with a "RecordSet" model, where all records with the same name and type are grouped.
-	// Individual record changes are often not useful in such scenarios. Instead we return a map of record keys to a list of change descriptions within that group.
 	ChangedGroups(existing []*models.RecordConfig) map[models.RecordKey][]string
 }
-
-// New is a constructor for a Differ.
 func New(dc *models.DomainConfig, extraValues ...func(*models.RecordConfig) map[string]string) Differ {
 	return &differ{
 		dc:          dc,
 		extraValues: extraValues,
 
-		// compile IGNORE glob patterns
 		compiledIgnoredLabels: compileIgnoredLabels(dc.IgnoredLabels),
 	}
 }
@@ -46,18 +37,10 @@ type differ struct {
 
 	compiledIgnoredLabels []glob.Glob
 }
-
-// get normalized content for record. target, ttl, mxprio, and specified metadata
 func (d *differ) content(r *models.RecordConfig) string {
-	// NB(tlim): This function will eventually be replaced by calling
-	// r.GetTargetDiffable().  In the meanwhile, this function compares
-	// its output with r.GetTargetDiffable() to make sure the same
-	// results are generated.  Once we have confidence, this function will go away.
 	content := fmt.Sprintf("%v ttl=%d", r.GetTargetCombined(), r.TTL)
 	var allMaps []map[string]string
 	for _, f := range d.extraValues {
-		// sort the extra values map keys to perform a deterministic
-		// comparison since Golang maps iteration order is not guaranteed
 		valueMap := f(r)
 		allMaps = append(allMaps, valueMap)
 		keys := make([]string, 0)
@@ -84,8 +67,6 @@ func (d *differ) IncrementalDiff(existing []*models.RecordConfig) (unchanged, cr
 	modify = Changeset{}
 	desired := d.dc.Records
 
-	// sort existing and desired by name
-
 	existingByNameAndType := map[models.RecordKey][]*models.RecordConfig{}
 	desiredByNameAndType := map[models.RecordKey][]*models.RecordConfig{}
 	for _, e := range existing {
@@ -104,7 +85,6 @@ func (d *differ) IncrementalDiff(existing []*models.RecordConfig) (unchanged, cr
 			desiredByNameAndType[k] = append(desiredByNameAndType[k], dr)
 		}
 	}
-	// if NO_PURGE is set, just remove anything that is only in existing.
 	if d.dc.KeepUnknown {
 		for k := range existingByNameAndType {
 			if _, ok := desiredByNameAndType[k]; !ok {
@@ -113,12 +93,9 @@ func (d *differ) IncrementalDiff(existing []*models.RecordConfig) (unchanged, cr
 			}
 		}
 	}
-	// Look through existing records. This will give us changes and deletions and some additions.
-	// Each iteration is only for a single type/name record set
 	for key, existingRecords := range existingByNameAndType {
 		desiredRecords := desiredByNameAndType[key]
 
-		// Very first, get rid of any identical records. Easy.
 		for i := len(existingRecords) - 1; i >= 0; i-- {
 			ex := existingRecords[i]
 			for j, de := range desiredRecords {
@@ -132,14 +109,11 @@ func (d *differ) IncrementalDiff(existing []*models.RecordConfig) (unchanged, cr
 			}
 		}
 
-		// Next, match by target. This will give the most natural modifications.
 		for i := len(existingRecords) - 1; i >= 0; i-- {
 			ex := existingRecords[i]
 			for j, de := range desiredRecords {
 				if de.GetTargetField() == ex.GetTargetField() {
-					// two records share a target, but different content (ttl or metadata changes)
 					modify = append(modify, Correlation{d, ex, de})
-					// remove from both slices by index
 					existingRecords = existingRecords[:i+copy(existingRecords[i:], existingRecords[i+1:])]
 					desiredRecords = desiredRecords[:j+copy(desiredRecords[j:], desiredRecords[j+1:])]
 					break
@@ -149,7 +123,6 @@ func (d *differ) IncrementalDiff(existing []*models.RecordConfig) (unchanged, cr
 
 		desiredLookup := map[string]*models.RecordConfig{}
 		existingLookup := map[string]*models.RecordConfig{}
-		// build index based on normalized content data
 		for _, ex := range existingRecords {
 			normalized := d.content(ex)
 			if existingLookup[normalized] != nil {
@@ -164,7 +137,6 @@ func (d *differ) IncrementalDiff(existing []*models.RecordConfig) (unchanged, cr
 			}
 			desiredLookup[normalized] = de
 		}
-		// if a record is in both, it is unchanged
 		for norm, ex := range existingLookup {
 			if de, ok := desiredLookup[norm]; ok {
 				unchanged = append(unchanged, Correlation{d, ex, de})
@@ -172,29 +144,22 @@ func (d *differ) IncrementalDiff(existing []*models.RecordConfig) (unchanged, cr
 				delete(desiredLookup, norm)
 			}
 		}
-		// sort records by normalized text. Keeps behaviour deterministic
 		existingStrings, desiredStrings := sortedKeys(existingLookup), sortedKeys(desiredLookup)
-		// Modifications. Take 1 from each side.
 		for len(desiredStrings) > 0 && len(existingStrings) > 0 {
 			modify = append(modify, Correlation{d, existingLookup[existingStrings[0]], desiredLookup[desiredStrings[0]]})
 			existingStrings = existingStrings[1:]
 			desiredStrings = desiredStrings[1:]
 		}
-		// If desired still has things they are additions
 		for _, norm := range desiredStrings {
 			rec := desiredLookup[norm]
 			create = append(create, Correlation{d, nil, rec})
 		}
-		// if found , but not desired, delete it
 		for _, norm := range existingStrings {
 			rec := existingLookup[norm]
 			toDelete = append(toDelete, Correlation{d, rec, nil})
 		}
-		// remove this set from the desired list to indicate we have processed it.
 		delete(desiredByNameAndType, key)
 	}
-
-	// any name/type sets not already processed are pure additions
 	for name := range existingByNameAndType {
 		delete(desiredByNameAndType, name)
 	}
@@ -220,13 +185,9 @@ func (d *differ) ChangedGroups(existing []*models.RecordConfig) map[models.Recor
 	}
 	return changedKeys
 }
-
-// DebugKeyMapMap debug prints the results from ChangedGroups.
 func DebugKeyMapMap(note string, m map[models.RecordKey][]string) {
-	// The output isn't pretty but it is useful.
 	fmt.Println("DEBUG:", note)
 
-	// Extract the keys
 	var keys []models.RecordKey
 	for k := range m {
 		keys = append(keys, k)
@@ -238,7 +199,6 @@ func DebugKeyMapMap(note string, m map[models.RecordKey][]string) {
 		return keys[i].NameFQDN < keys[j].NameFQDN
 	})
 
-	// Pretty print the map:
 	for _, k := range keys {
 		fmt.Printf("   %v %v:\n", k.Type, k.NameFQDN)
 		for _, s := range m[k] {
